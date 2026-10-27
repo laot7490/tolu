@@ -1,6 +1,6 @@
 {
 	"name": "@laot/tolu",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "Convert TypeScript types to EmmyLua annotations.",
 	"license": "MIT",
 	"repository": {
