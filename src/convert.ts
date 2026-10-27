@@ -5,9 +5,11 @@ import {
 	Type,
 	TypeFormatFlags,
 	type InterfaceDeclaration,
+	type MethodSignature,
 	type TypeAliasDeclaration,
 	type TypeNode,
 } from "ts-morph";
+import { emitLua, type LuaClass, type LuaDecl } from "./emit.js";
 
 const KEYWORD_KINDS = new Set([
 	SyntaxKind.StringKeyword,
@@ -23,7 +25,6 @@ const KEYWORD_KINDS = new Set([
 	SyntaxKind.BigIntKeyword,
 	SyntaxKind.SymbolKeyword,
 ]);
-import { emitLua, type LuaClass } from "./emit.js";
 
 function pascalCase(name: string): string {
 	return name.charAt(0).toUpperCase() + name.slice(1);
@@ -36,7 +37,7 @@ function singularize(name: string): string {
 }
 
 type ConvertCtx = {
-	classes: LuaClass[];
+	decls: LuaDecl[];
 	seen: Set<string>;
 };
 
@@ -76,20 +77,7 @@ function typeNodeToLua(typeNode: TypeNode | undefined, type: Type, parentName: s
 		}
 
 		if (Node.isFunctionTypeNode(typeNode)) {
-			const params = typeNode.getParameters().map((p) => {
-				const n = p.getName();
-				const tn = p.getTypeNode();
-				const t = tn
-					? typeNodeToLua(tn, tn.getType(), parentName, fieldName, ctx)
-					: typeToLua(p.getType(), parentName, fieldName, ctx);
-				return `${n}: ${t}`;
-			});
-			const ret = typeNode.getReturnTypeNode();
-			if (ret && ret.getText() !== "void") {
-				const retLua = typeNodeToLua(ret, ret.getType(), parentName, fieldName, ctx);
-				return `fun(${params.join(", ")}): ${retLua}`;
-			}
-			return `fun(${params.join(", ")})`;
+			return functionTypeNodeToLua(typeNode, parentName, fieldName, ctx);
 		}
 
 		if (Node.isTypeReference(typeNode)) {
@@ -129,9 +117,53 @@ function typeNodeToLua(typeNode: TypeNode | undefined, type: Type, parentName: s
 			const inner = typeNode.getTypeNode();
 			return typeNodeToLua(inner, inner.getType(), parentName, fieldName, ctx);
 		}
+
+		if (Node.isIntersectionTypeNode(typeNode)) {
+			return typeNode
+				.getTypeNodes()
+				.map((n) => typeNodeToLua(n, n.getType(), parentName, fieldName, ctx))
+				.join("&");
+		}
 	}
 
 	return typeToLua(type, parentName, fieldName, ctx);
+}
+
+function functionTypeNodeToLua(
+	typeNode: import("ts-morph").FunctionTypeNode,
+	parentName: string,
+	fieldName: string,
+	ctx: ConvertCtx,
+): string {
+	const params = typeNode.getParameters().map((p) => {
+		const n = p.getName();
+		const tn = p.getTypeNode();
+		const t = tn
+			? typeNodeToLua(tn, tn.getType(), parentName, fieldName, ctx)
+			: typeToLua(p.getType(), parentName, fieldName, ctx);
+		return `${n}: ${t}`;
+	});
+	const ret = typeNode.getReturnTypeNode();
+	if (ret && ret.getText() !== "void") {
+		return `fun(${params.join(", ")}): ${typeNodeToLua(ret, ret.getType(), parentName, fieldName, ctx)}`;
+	}
+	return `fun(${params.join(", ")})`;
+}
+
+function methodSignatureToLua(method: MethodSignature, parentName: string, ctx: ConvertCtx): string {
+	const params = method.getParameters().map((p) => {
+		const n = p.getName();
+		const tn = p.getTypeNode();
+		const t = tn
+			? typeNodeToLua(tn, tn.getType(), parentName, method.getName(), ctx)
+			: typeToLua(p.getType(), parentName, method.getName(), ctx);
+		return `${n}: ${t}`;
+	});
+	const ret = method.getReturnTypeNode();
+	if (ret && ret.getText() !== "void") {
+		return `fun(${params.join(", ")}): ${typeNodeToLua(ret, ret.getType(), parentName, method.getName(), ctx)}`;
+	}
+	return `fun(${params.join(", ")})`;
 }
 
 function typeToLua(type: Type, parentName: string, fieldName: string, ctx: ConvertCtx): string {
@@ -148,7 +180,6 @@ function typeToLua(type: Type, parentName: string, fieldName: string, ctx: Conve
 			.getUnionTypes()
 			.filter((t) => !t.isUndefined())
 			.map((t) => typeToLua(t, parentName, fieldName, ctx));
-		// boolean sometimes shows up as true|false
 		if (parts.length === 2 && parts.includes("true") && parts.includes("false")) {
 			return "boolean";
 		}
@@ -233,28 +264,8 @@ function hoistObject(name: string, props: PropInfo[], ctx: ConvertCtx): void {
 	if (ctx.seen.has(name)) return;
 	ctx.seen.add(name);
 
-	const fields: LuaClass["fields"] = [];
-	for (const prop of props) {
-		let luaType = typeNodeToLua(prop.typeNode, prop.type, name, prop.name, ctx);
-		if (prop.optional && !luaType.split("|").includes("nil")) {
-			luaType = `${luaType}|nil`;
-		}
-		fields.push({ name: prop.name, type: luaType });
-	}
-
-	ctx.classes.push({ name, fields });
-}
-
-function collectObjectLike(
-	name: string,
-	props: Array<{ name: string; optional: boolean; typeNode: TypeNode | undefined; type: Type }>,
-	ctx: ConvertCtx,
-): void {
-	if (ctx.seen.has(name)) return;
-	ctx.seen.add(name);
-
-	const nested: LuaClass[] = [];
-	const nestedCtx: ConvertCtx = { classes: nested, seen: ctx.seen };
+	const nested: LuaDecl[] = [];
+	const nestedCtx: ConvertCtx = { decls: nested, seen: ctx.seen };
 	const fields: LuaClass["fields"] = [];
 
 	for (const prop of props) {
@@ -265,42 +276,130 @@ function collectObjectLike(
 		fields.push({ name: prop.name, type: luaType });
 	}
 
-	ctx.classes.push({ name, fields });
-	ctx.classes.push(...nested);
+	ctx.decls.push({ kind: "class", name, fields });
+	ctx.decls.push(...nested);
+}
+
+function collectObjectLike(name: string, props: PropInfo[], ctx: ConvertCtx, parents?: string[]): void {
+	if (ctx.seen.has(name)) return;
+	ctx.seen.add(name);
+
+	const nested: LuaDecl[] = [];
+	const nestedCtx: ConvertCtx = { decls: nested, seen: ctx.seen };
+	const fields: LuaClass["fields"] = [];
+
+	for (const prop of props) {
+		let luaType = typeNodeToLua(prop.typeNode, prop.type, name, prop.name, nestedCtx);
+		if (prop.optional && !luaType.split("|").includes("nil")) {
+			luaType = `${luaType}|nil`;
+		}
+		fields.push({ name: prop.name, type: luaType });
+	}
+
+	ctx.decls.push({
+		kind: "class",
+		name,
+		fields,
+		...(parents?.length ? { parents } : {}),
+	});
+	ctx.decls.push(...nested);
 }
 
 function collectFromAlias(decl: TypeAliasDeclaration, ctx: ConvertCtx): void {
-	const typeNode = decl.getTypeNode();
-	if (!typeNode || !Node.isTypeLiteral(typeNode)) return;
+	const name = decl.getName();
+	if (ctx.seen.has(name)) return;
 
-	collectObjectLike(
-		decl.getName(),
-		typeNode.getProperties().map((p) => ({
-			name: p.getName(),
-			optional: p.hasQuestionToken(),
-			typeNode: p.getTypeNode(),
-			type: p.getTypeNode()?.getType() ?? p.getType(),
-		})),
-		ctx,
-	);
+	const typeNode = decl.getTypeNode();
+	if (!typeNode) return;
+
+	if (Node.isTypeLiteral(typeNode)) {
+		collectObjectLike(
+			name,
+			typeNode.getProperties().map((p) => ({
+				name: p.getName(),
+				optional: p.hasQuestionToken(),
+				typeNode: p.getTypeNode(),
+				type: p.getTypeNode()?.getType() ?? p.getType(),
+			})),
+			ctx,
+		);
+		return;
+	}
+
+	// unions, primitives, refs, etc. → ---@alias
+	ctx.seen.add(name);
+	const luaType = typeNodeToLua(typeNode, typeNode.getType(), name, name, ctx);
+	ctx.decls.push({ kind: "alias", name, type: luaType });
 }
 
 function collectFromInterface(decl: InterfaceDeclaration, ctx: ConvertCtx): void {
-	collectObjectLike(
-		decl.getName(),
-		decl.getProperties().map((p) => ({
-			name: p.getName(),
-			optional: p.hasQuestionToken(),
-			typeNode: p.getTypeNode(),
-			type: p.getTypeNode()?.getType() ?? p.getType(),
-		})),
-		ctx,
-	);
+	const name = decl.getName();
+	if (ctx.seen.has(name)) return;
+
+	const parents = decl
+		.getExtends()
+		.map((e) => e.getExpression().getText())
+		.filter(Boolean);
+
+	const props: PropInfo[] = decl.getProperties().map((p) => ({
+		name: p.getName(),
+		optional: p.hasQuestionToken(),
+		typeNode: p.getTypeNode(),
+		type: p.getTypeNode()?.getType() ?? p.getType(),
+	}));
+
+	// methods become fun(...) fields
+	const methodFields: LuaClass["fields"] = [];
+	const nested: LuaDecl[] = [];
+	const nestedCtx: ConvertCtx = { decls: nested, seen: ctx.seen };
+
+	for (const method of decl.getMethods()) {
+		let luaType = methodSignatureToLua(method, name, nestedCtx);
+		if (method.hasQuestionToken() && !luaType.split("|").includes("nil")) {
+			luaType = `${luaType}|nil`;
+		}
+		methodFields.push({ name: method.getName(), type: luaType });
+	}
+
+	ctx.seen.add(name);
+	const fields: LuaClass["fields"] = [];
+
+	for (const prop of props) {
+		let luaType = typeNodeToLua(prop.typeNode, prop.type, name, prop.name, nestedCtx);
+		if (prop.optional && !luaType.split("|").includes("nil")) {
+			luaType = `${luaType}|nil`;
+		}
+		fields.push({ name: prop.name, type: luaType });
+	}
+	fields.push(...methodFields);
+
+	ctx.decls.push({
+		kind: "class",
+		name,
+		fields,
+		...(parents.length ? { parents } : {}),
+	});
+	ctx.decls.push(...nested);
 }
 
 export type ConvertOptions = {
 	fileName?: string;
 };
+
+function collectFromSourceFile(sf: import("ts-morph").SourceFile, ctx: ConvertCtx): void {
+	if (sf.isDeclarationFile()) return;
+
+	const decls = [
+		...sf.getTypeAliases().map((d) => ({ d, kind: "alias" as const })),
+		...sf.getInterfaces().map((d) => ({ d, kind: "interface" as const })),
+	].sort((a, b) => a.d.getPos() - b.d.getPos());
+
+	for (const { d, kind } of decls) {
+		if (!d.isExported() && !d.isDefaultExport()) continue;
+		if (kind === "alias") collectFromAlias(d, ctx);
+		else collectFromInterface(d, ctx);
+	}
+}
 
 export function convertSource(source: string, options: ConvertOptions = {}): string {
 	const project = new Project({
@@ -312,18 +411,9 @@ export function convertSource(source: string, options: ConvertOptions = {}): str
 	});
 
 	const sf = project.createSourceFile(options.fileName ?? "input.ts", source);
-	const ctx: ConvertCtx = { classes: [], seen: new Set() };
-
-	for (const decl of sf.getTypeAliases()) {
-		if (!decl.isExported()) continue;
-		collectFromAlias(decl, ctx);
-	}
-	for (const decl of sf.getInterfaces()) {
-		if (!decl.isExported()) continue;
-		collectFromInterface(decl, ctx);
-	}
-
-	return emitLua(ctx.classes);
+	const ctx: ConvertCtx = { decls: [], seen: new Set() };
+	collectFromSourceFile(sf, ctx);
+	return emitLua(ctx.decls);
 }
 
 export function convertFiles(filePaths: string[]): string {
@@ -338,18 +428,11 @@ export function convertFiles(filePaths: string[]): string {
 		project.addSourceFileAtPath(filePath);
 	}
 
-	const ctx: ConvertCtx = { classes: [], seen: new Set() };
+	const ctx: ConvertCtx = { decls: [], seen: new Set() };
 
 	for (const sf of project.getSourceFiles()) {
-		for (const decl of sf.getTypeAliases()) {
-			if (!decl.isExported()) continue;
-			collectFromAlias(decl, ctx);
-		}
-		for (const decl of sf.getInterfaces()) {
-			if (!decl.isExported()) continue;
-			collectFromInterface(decl, ctx);
-		}
+		collectFromSourceFile(sf, ctx);
 	}
 
-	return emitLua(ctx.classes);
+	return emitLua(ctx.decls);
 }

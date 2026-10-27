@@ -4,3 +4,4 @@ release/
 *.tsbuildinfo
 .DS_Store
 test/out-*.lua
+test/

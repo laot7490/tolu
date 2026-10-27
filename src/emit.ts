@@ -4,14 +4,33 @@ export const LUA_HEADER = [
 ].join('\n')
 
 export type LuaClass = {
+  kind: 'class'
   name: string
+  parents?: string[]
   fields: Array<{ name: string; type: string }>
 }
 
-export function emitLua(classes: LuaClass[]): string {
-  const blocks = classes.map((cls) => {
-    const lines = [`---@class ${cls.name}`]
-    for (const field of cls.fields) {
+export type LuaAlias = {
+  kind: 'alias'
+  name: string
+  type: string
+}
+
+export type LuaDecl = LuaClass | LuaAlias
+
+export function emitLua(decls: LuaDecl[]): string {
+  if (decls.length === 0) {
+    return `${LUA_HEADER}\n`
+  }
+
+  const blocks = decls.map((decl) => {
+    if (decl.kind === 'alias') {
+      return `---@alias ${decl.name} ${decl.type}`
+    }
+
+    const parentSuffix = decl.parents?.length ? ` : ${decl.parents.join(', ')}` : ''
+    const lines = [`---@class ${decl.name}${parentSuffix}`]
+    for (const field of decl.fields) {
       lines.push(`---@field ${field.name} ${field.type}`)
     }
     return lines.join('\n')

@@ -1,54 +1,66 @@
+export type AppChromeTone = "light" | "dark";
+
+export interface NamedEntity {
+	id: number;
+	name: string;
+}
+
+export interface Player extends NamedEntity {
+	online: boolean;
+	ping(ms: number): void;
+}
+
 export type Example = {
-    id: number;
-    name: string;
-    icon: string;
-    title: string;
-    message: string;
-    time: string;
+	id: number;
+	name: string;
+	icon: string;
+	title: string;
+	message: string;
+	time: string;
 
-    active: boolean;
-    count: number | null;
-    description?: string;
+	active: boolean;
+	count: number | null;
+	description?: string;
 
-    tags: string[];
-    scores: number[];
+	tags: string[];
+	scores: number[];
 
-    status: "idle" | "loading" | "success" | "error";
+	status: "idle" | "loading" | "success" | "error";
 
-    user: {
-        id: number;
-        name: string;
-        avatar?: string;
-    };
+	user: {
+		id: number;
+		name: string;
+		avatar?: string;
+	};
 
-    metadata: Record<string, string>;
-    users: Record<number, User>;
+	metadata: Record<string, string>;
+	users: Record<number, User>;
 
-    items: Array<{
-        id: number;
-        label: string;
-    }>;
+	items: Array<{
+		id: number;
+		label: string;
+	}>;
 
-    position: [number, number, number];
+	position: [number, number, number];
 
-    value: string | number | boolean;
+	value: string | number | boolean;
 
-    callback: (id: number) => void;
+	callback: (id: number) => void;
 
-    readonly createdAt: string;
+	readonly createdAt: string;
 };
 
 export type User = {
-    id: number;
-    name: string;
-    online: boolean;
+	id: number;
+	name: string;
+	online: boolean;
 };
 
 export type Notification = {
-    id: number;
-    type: "info" | "success" | "warning" | "error";
-    title: string;
-    message: string;
-    timestamp: number;
-    read?: boolean;
+	id: number;
+	type: "info" | "success" | "warning" | "error";
+	title: string;
+	message: string;
+	timestamp: number;
+	read?: boolean;
 };
